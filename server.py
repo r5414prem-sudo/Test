@@ -7,9 +7,9 @@ from psycopg2.extras import RealDictCursor
 import threading
 import time
 import json
-from mega import Mega
 import secrets
 import hashlib
+import requests
 
 app = Flask(__name__)
 CORS(app)
@@ -168,9 +168,9 @@ def init_database():
 # ============ MEGA.NZ BACKUP ============
 
 def backup_to_mega():
-    """Backup all chat logs to Mega.nz and clear database"""
+    """Backup all chat logs to file and optionally upload"""
     try:
-        print("📦 Starting hourly backup to Mega.nz...")
+        print("📦 Starting hourly backup...")
         
         conn = get_db_connection()
         if not conn:
@@ -212,35 +212,46 @@ def backup_to_mega():
         
         filename = f"chat_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         
+        # Save backup locally
         with open(f"/tmp/{filename}", 'w') as f:
             json.dump(backup_data, f, indent=2)
         
+        print(f"✅ Backup saved: /tmp/{filename}")
+        
+        # Try to upload to file.io (free alternative to Mega.nz)
         if MEGA_EMAIL and MEGA_PASSWORD:
             try:
-                mega = Mega()
-                m = mega.login(MEGA_EMAIL, MEGA_PASSWORD)
+                with open(f"/tmp/{filename}", 'rb') as f:
+                    # Upload to file.io (14 day storage)
+                    response = requests.post(
+                        'https://file.io',
+                        files={'file': f},
+                        data={'expires': '14d'}  # Keep for 14 days
+                    )
+                    
+                    if response.status_code == 200:
+                        result = response.json()
+                        if result.get('success'):
+                            download_link = result.get('link')
+                            print(f"✅ Backup uploaded!")
+                            print(f"🔗 Download link (valid 14 days): {download_link}")
+                            print(f"⚠️  SAVE THIS LINK! It will expire in 14 days!")
+                        else:
+                            print(f"⚠️  Upload failed: {result}")
+                    else:
+                        print(f"⚠️  Upload failed with status {response.status_code}")
                 
-                folder = None
-                files = m.get_files()
-                
-                for file_id in files:
-                    file_data = files[file_id]
-                    if file_data['a'] and file_data['a'].get('n') == 'PrimeX Chat Backups' and file_data['t'] == 1:
-                        folder = file_data
-                        break
-                
-                if not folder:
-                    folder = m.create_folder('PrimeX Chat Backups')
-                    print("📁 Created folder: PrimeX Chat Backups")
-                
-                file = m.upload(f"/tmp/{filename}", folder[0] if isinstance(folder, tuple) else folder)
-                print(f"✅ Backup uploaded to Mega.nz/PrimeX Chat Backups/{filename}")
-                
-                os.remove(f"/tmp/{filename}")
+                # Keep local copy
+                print(f"📁 Local backup kept at: /tmp/{filename}")
                 
             except Exception as e:
-                print(f"❌ Mega.nz upload error: {e}")
+                print(f"⚠️  Upload error: {e}")
+                print(f"📁 Backup saved locally only: /tmp/{filename}")
+        else:
+            print("ℹ️  Cloud backup not configured (set MEGA_EMAIL/PASSWORD)")
+            print(f"📁 Backup saved locally: /tmp/{filename}")
         
+        # Clear messages from database
         cur.execute('DELETE FROM messages')
         deleted = cur.rowcount
         
@@ -248,7 +259,7 @@ def backup_to_mega():
         cur.close()
         conn.close()
         
-        print(f"✅ Backup complete! {deleted} messages cleared")
+        print(f"✅ Backup complete! {deleted} messages cleared from database")
         
     except Exception as e:
         print(f"❌ Backup error: {e}")
@@ -271,7 +282,8 @@ def home():
         "status": "online",
         "service": "Prime X Hub Universal Chat - SECURED",
         "version": "4.0",
-        "security": "API Key + User ID Authentication"
+        "security": "API Key + User ID Authentication",
+        "backup": "Enabled - file.io (14 days)" if MEGA_EMAIL else "Disabled"
     })
 
 @app.route('/send', methods=['POST'])
@@ -576,31 +588,4 @@ def manual_backup():
         user_id = int(data.get('user_id', 0))
         
         if not is_owner(user_id):
-            return jsonify({"error": "Unauthorized - Owners only"}), 403
-        
-        threading.Thread(target=backup_to_mega, daemon=True).start()
-        
-        return jsonify({
-            "success": True,
-            "message": "Backup started"
-        })
-        
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-if __name__ == '__main__':
-    print("🚀 Starting SECURE Prime X Chat Server v4.0...")
-    print("="*60)
-    
-    if DATABASE_URL:
-        if init_database():
-            print("✅ Database ready!")
-    else:
-        print("⚠️  WARNING: DATABASE_URL not set!")
-    
-    if MEGA_EMAIL and MEGA_PASSWORD:
-        print("☁️  Mega.nz backup configured")
-    else:
-        print("⚠️  Mega.nz not configured")
-    
-  
+            return jsonify({"error": "Unauthorized - Owne
