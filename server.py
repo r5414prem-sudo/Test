@@ -8,42 +8,63 @@ import threading
 import time
 import json
 from mega import Mega
+import secrets
+import hashlib
 
 app = Flask(__name__)
 CORS(app)
 
-# 👑 RANK SYSTEM - YOUR ACTUAL USERNAMES
-RANKS = {
-    "foffasfieifro": {"rank": "Owner", "emoji": "👑", "color": "#FFD700", "level": 3},
-    "Ya_shumi09": {"rank": "Owner", "emoji": "👑", "color": "#FFD700", "level": 3},
-    "shimul2222222": {"rank": "Mod", "emoji": "🛡️", "color": "#4ECDC4", "level": 2},
+# 🔐 SECURITY: API Key Authentication
+API_KEY = os.environ.get('API_KEY', secrets.token_urlsafe(32))  # Generate secure key
+print(f"🔑 API Key: {API_KEY}")  # Show this ONCE when server starts
+
+# 🔐 SECURITY: Trusted User IDs (use Roblox User IDs, not names!)
+TRUSTED_USERS = {
+    # Add your actual Roblox User IDs here
+    # Example: 123456789: {"rank": "Owner", "emoji": "👑", "color": "#FFD700", "level": 3}
+}
+
+# 👑 RANK SYSTEM - BASED ON USER IDS (MORE SECURE)
+RANKS_BY_USERID = {
+    # REPLACE THESE WITH YOUR ACTUAL ROBLOX USER IDS
+    # To find your ID: go to roblox.com/users/YOUR_PROFILE and look at the URL
+    # Example: https://roblox.com/users/123456789/profile <- 123456789 is the ID
+    
+    # 123456789: {"username": "foffasfieifro", "rank": "Owner", "emoji": "👑", "color": "#FFD700", "level": 3},
+    # 987654321: {"username": "Ya_shumi09", "rank": "Owner", "emoji": "👑", "color": "#FFD700", "level": 3},
+    # 111222333: {"username": "shimul2222222", "rank": "Mod", "emoji": "🛡️", "color": "#4ECDC4", "level": 2},
 }
 
 DEFAULT_RANK = {"rank": "Member", "emoji": "👤", "color": "#CCCCCC", "level": 0}
 
-# Mega.nz Configuration
-MEGA_EMAIL = os.environ.get('MEGA_EMAIL')  # Set in Render environment variables
-MEGA_PASSWORD = os.environ.get('MEGA_PASSWORD')  # Set in Render environment variables
-
-# Banned users list (muted)
 BANNED_USERS = set()
-
-def get_user_rank(username):
-    """Get rank info for a user"""
-    return RANKS.get(username, DEFAULT_RANK)
-
-def is_staff(username):
-    """Check if user is staff (Owner or Mod)"""
-    rank_info = get_user_rank(username)
-    return rank_info.get('level', 0) >= 2
-
-def is_owner(username):
-    """Check if user is Owner"""
-    rank_info = get_user_rank(username)
-    return rank_info.get('level', 0) >= 3
 
 # Database connection
 DATABASE_URL = os.environ.get('DATABASE_URL')
+
+# Mega.nz Configuration
+MEGA_EMAIL = os.environ.get('MEGA_EMAIL')
+MEGA_PASSWORD = os.environ.get('MEGA_PASSWORD')
+
+def verify_api_key(request):
+    """Verify API key from request"""
+    api_key = request.headers.get('X-API-Key')
+    return api_key == API_KEY
+
+def get_user_rank(user_id):
+    """Get rank info by User ID (secure)"""
+    user_id = int(user_id) if user_id else 0
+    return RANKS_BY_USERID.get(user_id, DEFAULT_RANK)
+
+def is_staff(user_id):
+    """Check if user is staff by User ID"""
+    rank_info = get_user_rank(user_id)
+    return rank_info.get('level', 0) >= 2
+
+def is_owner(user_id):
+    """Check if user is Owner by User ID"""
+    rank_info = get_user_rank(user_id)
+    return rank_info.get('level', 0) >= 3
 
 def get_db_connection():
     """Create database connection"""
@@ -57,23 +78,23 @@ def get_db_connection():
         return None
 
 def init_database():
-    """Initialize database tables if they don't exist"""
+    """Initialize database tables"""
     if not DATABASE_URL:
-        print("⚠️  WARNING: DATABASE_URL not set - skipping database initialization")
+        print("⚠️  WARNING: DATABASE_URL not set")
         return False
     
     try:
         conn = get_db_connection()
         if not conn:
-            print("❌ Could not connect to database")
             return False
             
         cur = conn.cursor()
         
-        # Create messages table
+        # Messages table - now stores user_id
         cur.execute('''
             CREATE TABLE IF NOT EXISTS messages (
                 id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
                 username VARCHAR(50) NOT NULL,
                 message TEXT NOT NULL,
                 game VARCHAR(100) NOT NULL,
@@ -86,50 +107,54 @@ def init_database():
             )
         ''')
         
-        # Create banned users table
+        # Banned users - by user_id
         cur.execute('''
             CREATE TABLE IF NOT EXISTS banned_users (
-                username VARCHAR(50) PRIMARY KEY,
-                banned_by VARCHAR(50),
+                user_id BIGINT PRIMARY KEY,
+                username VARCHAR(50),
+                banned_by BIGINT,
                 reason TEXT,
                 banned_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
-        # Create active users table (for tracking who's online)
+        # Active users - by user_id
         cur.execute('''
             CREATE TABLE IF NOT EXISTS active_users (
-                username VARCHAR(50) PRIMARY KEY,
+                user_id BIGINT PRIMARY KEY,
+                username VARCHAR(50),
                 game VARCHAR(100),
                 last_seen TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
-        # Create private rooms table
+        # Private rooms
         cur.execute('''
             CREATE TABLE IF NOT EXISTS private_rooms (
                 room_code VARCHAR(10) PRIMARY KEY,
-                owner VARCHAR(50) NOT NULL,
+                owner_id BIGINT NOT NULL,
+                owner_name VARCHAR(50),
                 is_private BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
-        # Create room members table
+        # Room members
         cur.execute('''
             CREATE TABLE IF NOT EXISTS room_members (
                 id SERIAL PRIMARY KEY,
                 room_code VARCHAR(10) NOT NULL,
-                username VARCHAR(50) NOT NULL,
+                user_id BIGINT NOT NULL,
+                username VARCHAR(50),
                 joined_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(room_code, username)
+                UNIQUE(room_code, user_id)
             )
         ''')
         
-        # Create indexes for faster queries
         cur.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp DESC)')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_room ON messages(room)')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_last_seen ON active_users(last_seen DESC)')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_user_id ON messages(user_id)')
         
         conn.commit()
         cur.close()
@@ -140,7 +165,7 @@ def init_database():
         print(f"❌ Database initialization error: {e}")
         return False
 
-# ============ MEGA.NZ AUTO BACKUP SYSTEM ============
+# ============ MEGA.NZ BACKUP ============
 
 def backup_to_mega():
     """Backup all chat logs to Mega.nz and clear database"""
@@ -149,15 +174,13 @@ def backup_to_mega():
         
         conn = get_db_connection()
         if not conn:
-            print("❌ Database connection failed for backup")
             return
         
         cur = conn.cursor()
         
-        # Get all messages
         cur.execute('''
-            SELECT id, username, message, game, rank, rank_emoji, rank_color, 
-                   room, message_type, timestamp 
+            SELECT id, user_id, username, message, game, rank, rank_emoji, 
+                   rank_color, room, message_type, timestamp 
             FROM messages 
             ORDER BY timestamp ASC
         ''')
@@ -170,7 +193,6 @@ def backup_to_mega():
             conn.close()
             return
         
-        # Convert to JSON
         backup_data = {
             "backup_time": datetime.now().isoformat(),
             "message_count": len(messages),
@@ -180,31 +202,24 @@ def backup_to_mega():
         for msg in messages:
             backup_data["messages"].append({
                 "id": msg['id'],
+                "user_id": msg['user_id'],
                 "username": msg['username'],
                 "message": msg['message'],
                 "game": msg['game'],
                 "rank": msg['rank'],
-                "rank_emoji": msg['rank_emoji'],
-                "rank_color": msg['rank_color'],
-                "room": msg['room'],
-                "message_type": msg['message_type'],
                 "timestamp": msg['timestamp'].isoformat()
             })
         
-        # Create filename with timestamp
         filename = f"chat_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         
-        # Save to temporary file
         with open(f"/tmp/{filename}", 'w') as f:
             json.dump(backup_data, f, indent=2)
         
-        # Upload to Mega.nz
         if MEGA_EMAIL and MEGA_PASSWORD:
             try:
                 mega = Mega()
                 m = mega.login(MEGA_EMAIL, MEGA_PASSWORD)
                 
-                # Get or create "PrimeX Chat Backups" folder
                 folder = None
                 files = m.get_files()
                 
@@ -214,28 +229,18 @@ def backup_to_mega():
                         folder = file_data
                         break
                 
-                # Create folder if it doesn't exist
                 if not folder:
                     folder = m.create_folder('PrimeX Chat Backups')
                     print("📁 Created folder: PrimeX Chat Backups")
                 
-                # Upload file to the folder
                 file = m.upload(f"/tmp/{filename}", folder[0] if isinstance(folder, tuple) else folder)
                 print(f"✅ Backup uploaded to Mega.nz/PrimeX Chat Backups/{filename}")
                 
-                # Get shareable link
-                link = m.get_upload_link(file)
-                print(f"🔗 Backup link: {link}")
-                
-                # Clean up temp file
                 os.remove(f"/tmp/{filename}")
                 
             except Exception as e:
                 print(f"❌ Mega.nz upload error: {e}")
-        else:
-            print("⚠️  Mega.nz credentials not set, backup saved locally only")
         
-        # Clear messages from database
         cur.execute('DELETE FROM messages')
         deleted = cur.rowcount
         
@@ -243,7 +248,7 @@ def backup_to_mega():
         cur.close()
         conn.close()
         
-        print(f"✅ Backup complete! {deleted} messages cleared from database")
+        print(f"✅ Backup complete! {deleted} messages cleared")
         
     except Exception as e:
         print(f"❌ Backup error: {e}")
@@ -251,66 +256,65 @@ def backup_to_mega():
 def backup_scheduler():
     """Run backup every hour"""
     while True:
-        time.sleep(3600)  # Wait 1 hour (3600 seconds)
+        time.sleep(3600)
         backup_to_mega()
 
-# Start backup thread
 backup_thread = threading.Thread(target=backup_scheduler, daemon=True)
 backup_thread.start()
 print("⏰ Hourly backup scheduler started")
 
-# ============ API ENDPOINTS ============
+# ============ SECURE API ENDPOINTS ============
 
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({
         "status": "online",
-        "service": "Prime X Hub Universal Chat",
-        "database": "PostgreSQL Connected" if DATABASE_URL else "Not configured",
-        "features": ["ranks", "persistent_storage", "moderation", "private_rooms", "user_tracking", "auto_backup"],
-        "backup": "Mega.nz every 1 hour" if MEGA_EMAIL and MEGA_PASSWORD else "Not configured",
-        "version": "3.1"
+        "service": "Prime X Hub Universal Chat - SECURED",
+        "version": "4.0",
+        "security": "API Key + User ID Authentication"
     })
 
 @app.route('/send', methods=['POST'])
 def send_message():
-    """Endpoint to send a message - INSTANT NO DELAY"""
+    """Send message - SECURED with API Key + User ID"""
+    # Verify API key
+    if not verify_api_key(request):
+        return jsonify({"error": "Invalid API Key"}), 401
+    
     try:
         data = request.get_json()
         
-        if not data or 'username' not in data or 'message' not in data:
-            return jsonify({"error": "Missing username or message"}), 400
+        if not data or 'user_id' not in data or 'username' not in data or 'message' not in data:
+            return jsonify({"error": "Missing required fields"}), 400
         
+        user_id = int(data['user_id'])
         username = str(data['username'])[:50]
         message = str(data['message'])[:500]
         game = str(data.get('game', 'Unknown'))[:100]
         room = data.get('room')
         msg_type = data.get('type', 'general')
         
-        # Skip heartbeat messages from being stored
         if msg_type == 'heartbeat':
             conn = get_db_connection()
             if conn:
                 cur = conn.cursor()
                 cur.execute('''
-                    INSERT INTO active_users (username, game, last_seen)
-                    VALUES (%s, %s, CURRENT_TIMESTAMP)
-                    ON CONFLICT (username) 
-                    DO UPDATE SET game = %s, last_seen = CURRENT_TIMESTAMP
-                ''', (username, game, game))
+                    INSERT INTO active_users (user_id, username, game, last_seen)
+                    VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                    ON CONFLICT (user_id) 
+                    DO UPDATE SET username = %s, game = %s, last_seen = CURRENT_TIMESTAMP
+                ''', (user_id, username, game, username, game))
                 conn.commit()
                 cur.close()
                 conn.close()
             return jsonify({"success": True, "type": "heartbeat"}), 200
         
-        # Check if user is banned (in-memory check first for speed)
-        if username in BANNED_USERS:
-            return jsonify({"error": "You are muted from the chat"}), 403
+        # Check if user is banned
+        if user_id in BANNED_USERS:
+            return jsonify({"error": "You are muted"}), 403
         
-        # Get user rank
-        rank_info = get_user_rank(username)
+        rank_info = get_user_rank(user_id)
         
-        # Save to database
         conn = get_db_connection()
         if not conn:
             return jsonify({"error": "Database connection failed"}), 500
@@ -318,20 +322,19 @@ def send_message():
         cur = conn.cursor()
         
         cur.execute(
-            '''INSERT INTO messages (username, message, game, rank, rank_emoji, rank_color, room, message_type) 
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id, timestamp''',
-            (username, message, game, rank_info['rank'], rank_info['emoji'], rank_info['color'], room, msg_type)
+            '''INSERT INTO messages (user_id, username, message, game, rank, rank_emoji, rank_color, room, message_type) 
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id, timestamp''',
+            (user_id, username, message, game, rank_info['rank'], rank_info['emoji'], rank_info['color'], room, msg_type)
         )
         
         result = cur.fetchone()
         
-        # Update active users
         cur.execute('''
-            INSERT INTO active_users (username, game, last_seen)
-            VALUES (%s, %s, CURRENT_TIMESTAMP)
-            ON CONFLICT (username) 
-            DO UPDATE SET game = %s, last_seen = CURRENT_TIMESTAMP
-        ''', (username, game, game))
+            INSERT INTO active_users (user_id, username, game, last_seen)
+            VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (user_id) 
+            DO UPDATE SET username = %s, game = %s, last_seen = CURRENT_TIMESTAMP
+        ''', (user_id, username, game, username, game))
         
         conn.commit()
         cur.close()
@@ -355,7 +358,10 @@ def send_message():
 
 @app.route('/messages', methods=['GET'])
 def get_messages():
-    """Endpoint to get messages - INSTANT NO DELAY"""
+    """Get messages - SECURED"""
+    if not verify_api_key(request):
+        return jsonify({"error": "Invalid API Key"}), 401
+    
     try:
         since_id = request.args.get('since_id', 0, type=int)
         limit = request.args.get('limit', 50, type=int)
@@ -370,7 +376,6 @@ def get_messages():
         cur = conn.cursor()
         
         if room:
-            # Get room messages
             cur.execute(
                 '''SELECT id, username, message, game, rank, rank_emoji, rank_color, timestamp 
                    FROM messages WHERE room = %s AND id > %s 
@@ -378,7 +383,6 @@ def get_messages():
                 (room, since_id, limit)
             )
         else:
-            # Get general messages (no room)
             cur.execute(
                 '''SELECT id, username, message, game, rank, rank_emoji, rank_color, timestamp 
                    FROM messages WHERE (room IS NULL OR room = '') AND id > %s 
@@ -413,10 +417,25 @@ def get_messages():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/active-users', methods=['GET'])
-def get_active_users():
-    """Get list of currently active users"""
+@app.route('/mute', methods=['POST'])
+def mute_user():
+    """Mute user - SECURED"""
+    if not verify_api_key(request):
+        return jsonify({"error": "Invalid API Key"}), 401
+    
     try:
+        data = request.get_json()
+        moderator_id = int(data.get('moderator_id'))
+        target_user_id = int(data.get('target_user_id'))
+        target_username = data.get('target_username', 'Unknown')
+        reason = data.get('reason', 'No reason')
+        
+        if not is_staff(moderator_id):
+            return jsonify({"error": "Unauthorized"}), 403
+        
+        if is_staff(target_user_id):
+            return jsonify({"error": "Cannot mute staff"}), 400
+        
         conn = get_db_connection()
         if not conn:
             return jsonify({"error": "Database connection failed"}), 500
@@ -424,30 +443,78 @@ def get_active_users():
         cur = conn.cursor()
         
         cur.execute('''
-            SELECT username, game, last_seen 
-            FROM active_users 
-            WHERE last_seen > %s
-            ORDER BY last_seen DESC
-        ''', (datetime.now() - timedelta(minutes=2),))
+            INSERT INTO banned_users (user_id, username, banned_by, reason) 
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (user_id) DO NOTHING
+        ''', (target_user_id, target_username, moderator_id, reason))
         
-        users = cur.fetchall()
-        
-        active_list = []
-        for user in users:
-            active_list.append({
-                "username": user['username'],
-                "game": user['game'],
-                "last_seen": user['last_seen'].isoformat()
-            })
-        
+        conn.commit()
         cur.close()
         conn.close()
         
-        return jsonify({
-            "success": True,
-            "count": len(active_list),
-            "active_users": active_list
-        })
+        BANNED_USERS.add(target_user_id)
+        
+        return jsonify({"success": True, "message": f"{target_username} muted"})
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/unmute', methods=['POST'])
+def unmute_user():
+    """Unmute user - SECURED"""
+    if not verify_api_key(request):
+        return jsonify({"error": "Invalid API Key"}), 401
+    
+    try:
+        data = request.get_json()
+        moderator_id = int(data.get('moderator_id'))
+        target_user_id = int(data.get('target_user_id'))
+        
+        if not is_staff(moderator_id):
+            return jsonify({"error": "Unauthorized"}), 403
+        
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"error": "Database connection failed"}), 500
+            
+        cur = conn.cursor()
+        cur.execute('DELETE FROM banned_users WHERE user_id = %s', (target_user_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        BANNED_USERS.discard(target_user_id)
+        
+        return jsonify({"success": True})
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/clear', methods=['POST'])
+def clear_messages():
+    """Clear messages - SECURED"""
+    if not verify_api_key(request):
+        return jsonify({"error": "Invalid API Key"}), 401
+    
+    try:
+        data = request.get_json()
+        user_id = int(data.get('user_id', 0))
+        
+        if not is_staff(user_id):
+            return jsonify({"error": "Unauthorized"}), 403
+        
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"error": "Database connection failed"}), 500
+            
+        cur = conn.cursor()
+        cur.execute('DELETE FROM messages')
+        deleted = cur.rowcount
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        return jsonify({"success": True, "deleted": deleted})
         
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -455,6 +522,9 @@ def get_active_users():
 @app.route('/stats', methods=['GET'])
 def get_stats():
     """Get chat statistics"""
+    if not verify_api_key(request):
+        return jsonify({"error": "Invalid API Key"}), 401
+    
     try:
         conn = get_db_connection()
         if not conn:
@@ -465,7 +535,7 @@ def get_stats():
         cur.execute('SELECT COUNT(*) as total FROM messages')
         total = cur.fetchone()['total']
         
-        cur.execute('SELECT COUNT(DISTINCT username) as users FROM messages')
+        cur.execute('SELECT COUNT(DISTINCT user_id) as users FROM messages')
         users = cur.fetchone()['users']
         
         cur.execute('SELECT COUNT(*) as today FROM messages WHERE DATE(timestamp) = CURRENT_DATE')
@@ -495,115 +565,42 @@ def get_stats():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ============ PRIVATE ROOMS ENDPOINTS ============
-
-@app.route('/room/create', methods=['POST'])
-def create_room():
-    """Create a private room"""
+@app.route('/manual-backup', methods=['POST'])
+def manual_backup():
+    """Manually trigger backup (Owner only)"""
+    if not verify_api_key(request):
+        return jsonify({"error": "Invalid API Key"}), 401
+    
     try:
         data = request.get_json()
-        owner = data.get('owner')
-        room_code = data.get('room_code')
+        user_id = int(data.get('user_id', 0))
         
-        if not owner or not room_code:
-            return jsonify({"error": "Missing owner or room_code"}), 400
+        if not is_owner(user_id):
+            return jsonify({"error": "Unauthorized - Owners only"}), 403
         
-        conn = get_db_connection()
-        if not conn:
-            return jsonify({"error": "Database connection failed"}), 500
-            
-        cur = conn.cursor()
-        
-        cur.execute('''
-            INSERT INTO private_rooms (room_code, owner, is_private)
-            VALUES (%s, %s, FALSE)
-            ON CONFLICT (room_code) DO NOTHING
-            RETURNING room_code
-        ''', (room_code, owner))
-        
-        result = cur.fetchone()
-        
-        if not result:
-            cur.close()
-            conn.close()
-            return jsonify({"error": "Room already exists"}), 400
-        
-        cur.execute('''
-            INSERT INTO room_members (room_code, username)
-            VALUES (%s, %s)
-        ''', (room_code, owner))
-        
-        conn.commit()
-        cur.close()
-        conn.close()
+        threading.Thread(target=backup_to_mega, daemon=True).start()
         
         return jsonify({
             "success": True,
-            "room_code": room_code,
-            "owner": owner
+            "message": "Backup started"
         })
         
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/room/join', methods=['POST'])
-def join_room():
-    """Join a private room"""
-    try:
-        data = request.get_json()
-        username = data.get('username')
-        room_code = data.get('room_code')
-        
-        if not username or not room_code:
-            return jsonify({"error": "Missing username or room_code"}), 400
-        
-        conn = get_db_connection()
-        if not conn:
-            return jsonify({"error": "Database connection failed"}), 500
-            
-        cur = conn.cursor()
-        
-        cur.execute('''
-            SELECT owner, is_private FROM private_rooms WHERE room_code = %s
-        ''', (room_code,))
-        
-        room = cur.fetchone()
-        
-        if not room:
-            cur.close()
-            conn.close()
-            return jsonify({"error": "Room not found"}), 404
-        
-        if room['is_private'] and room['owner'] != username:
-            cur.close()
-            conn.close()
-            return jsonify({"error": "Room is private"}), 403
-        
-        cur.execute('''
-            INSERT INTO room_members (room_code, username)
-            VALUES (%s, %s)
-            ON CONFLICT (room_code, username) DO NOTHING
-        ''', (room_code, username))
-        
-        conn.commit()
-        cur.close()
-        conn.close()
-        
-        return jsonify({
-            "success": True,
-            "room_code": room_code,
-            "username": username
-        })
-        
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/room/toggle-privacy', methods=['POST'])
-def toggle_room_privacy():
-    """Toggle room privacy"""
-    try:
-        data = request.get_json()
-        username = data.get('username')
-        room_code = data.get('room_code')
-        
-       
+if __name__ == '__main__':
+    print("🚀 Starting SECURE Prime X Chat Server v4.0...")
+    print("="*60)
+    
+    if DATABASE_URL:
+        if init_database():
+            print("✅ Database ready!")
+    else:
+        print("⚠️  WARNING: DATABASE_URL not set!")
+    
+    if MEGA_EMAIL and MEGA_PASSWORD:
+        print("☁️  Mega.nz backup configured")
+    else:
+        print("⚠️  Mega.nz not configured")
+    
+  
